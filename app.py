@@ -38,7 +38,9 @@ st.markdown(
       .block-container {padding-top: 1.5rem; padding-bottom: 2rem;}
       div[data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.18); padding: 12px 14px; border-radius: 12px;}
       .small-note {font-size: .88rem; opacity: .78;}
-      .guide-box {padding: 1rem 1.1rem; border-radius: .7rem; background: rgba(120,120,120,.08); margin-bottom: 1rem;}
+      .guide-box {padding: 1rem 1.1rem; border-radius: .7rem; background: rgba(120,120,120,.08); margin-bottom: 1rem; line-height:1.7;}
+      .conclusion-box {padding: 1rem 1.1rem; border-left: 4px solid rgba(80,120,180,.85); background: rgba(120,120,120,.055); border-radius: .35rem; margin-top: 1rem; line-height:1.75;}
+      .section-text {line-height:1.85; font-size:1rem;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -59,7 +61,6 @@ def load_data():
     for c in ["gasoline_price", "diesel_price", "premium_gasoline_price", "kerosene_price"]:
         if c in net.columns:
             net[c] = pd.to_numeric(net[c], errors="coerce")
-    net["self_service"] = net["self_service"].astype(str).str.upper().eq("Y")
     return cons, veh, net
 
 
@@ -73,12 +74,9 @@ def district_vehicle_series(district: str) -> pd.DataFrame:
     if d.empty:
         return pd.DataFrame(columns=["month", "count"])
 
-    # 전처리 파일에 '총계'가 있으면 이를 사용. 없을 때만 차종을 합산한다.
-    if (d["vehicle_type"] == "총계").any():
+    if "vehicle_type" in d.columns and (d["vehicle_type"] == "총계").any():
         d = d[d["vehicle_type"] == "총계"]
-        d = d.groupby("month", as_index=False)["count"].sum()
-    else:
-        d = d.groupby("month", as_index=False)["count"].sum()
+    d = d.groupby("month", as_index=False)["count"].sum()
     return d.sort_values("month")
 
 
@@ -109,7 +107,6 @@ def network_summary() -> pd.DataFrame:
             "stations": total,
             "gs_stations": gs,
             "gs_share": gs / total * 100 if total else np.nan,
-            "self_share": d["self_service"].mean() * 100 if total else np.nan,
             "vehicles": vehicles,
             "vehicle_yoy": vehicle_yoy,
             "vehicles_per_station": vehicles / total if total and pd.notna(vehicles) else np.nan,
@@ -123,26 +120,30 @@ def network_summary() -> pd.DataFrame:
     out["gs_diesel_gap"] = out["gs_diesel"] - out["district_diesel"]
     out["avg_price_gap"] = out[["gs_gasoline_gap", "gs_diesel_gap"]].mean(axis=1)
 
-    # 상대 비교용 점수: 실제 수익성 점수가 아니라 '추가 검토 순서'를 만들기 위한 스크리닝 점수
-    share_low = safe_rank_pct(out["gs_share"], ascending=False)  # 낮을수록 점수 높음
+    # 상대 비교용 스크리닝 점수. 실제 수익성 점수가 아님.
+    share_low = safe_rank_pct(out["gs_share"], ascending=False)
     vps_high = safe_rank_pct(out["vehicles_per_station"], ascending=True)
-    yoy_high = safe_rank_pct(out["vehicle_yoy"].fillna(out["vehicle_yoy"].median()), ascending=True)
+    yoy_fill = out["vehicle_yoy"].fillna(out["vehicle_yoy"].median())
+    yoy_high = safe_rank_pct(yoy_fill, ascending=True)
     out["expansion_score"] = (share_low + vps_high + yoy_high) / 3
 
     share_high = safe_rank_pct(out["gs_share"], ascending=True)
     vps_low = safe_rank_pct(out["vehicles_per_station"], ascending=False)
     out["efficiency_score"] = (share_high + vps_low) / 2
 
-    out["price_watch_score"] = safe_rank_pct(out["avg_price_gap"].fillna(out["avg_price_gap"].median()), ascending=True)
+    gap_fill = out["avg_price_gap"].fillna(out["avg_price_gap"].median())
+    out["price_watch_score"] = safe_rank_pct(gap_fill, ascending=True)
 
     med_share = out["gs_share"].median()
     med_vps = out["vehicles_per_station"].median()
+
     def label(r):
         if r["gs_share"] < med_share and r["vehicles_per_station"] > med_vps:
             return "Network 확대 우선검토"
         if r["gs_share"] >= med_share and r["vehicles_per_station"] <= med_vps:
             return "기존 Network 효율화 우선검토"
         return "개별 Network·가격 경쟁 추가점검"
+
     out["primary_action"] = out.apply(label, axis=1)
     return out
 
@@ -192,6 +193,44 @@ def guide(title: str, why: str, how: str, conclusion: str):
         unsafe_allow_html=True,
     )
 
+
+def conclusion_box(lines):
+    st.markdown("### 이 탭에서 얻을 수 있는 결론은 무엇인가요?")
+    body = "<br>".join(lines)
+    st.markdown(f'<div class="conclusion-box">{body}</div>', unsafe_allow_html=True)
+
+
+def fmt_num(x, digits=0):
+    if pd.isna(x):
+        return "확인 불가"
+    if digits == 0:
+        return f"{x:,.0f}"
+    return f"{x:,.{digits}f}"
+
+
+def price_position(percentile):
+    if pd.isna(percentile):
+        return "가격 위치 확인 불가"
+    p = float(percentile)
+    if p >= 50:
+        top = max(1, round(100 - p))
+        if p >= 80:
+            tone = "가격이 높은 편"
+        elif p >= 60:
+            tone = "가격이 다소 높은 편"
+        else:
+            tone = "중간보다 약간 높은 편"
+        return f"백분위 {p:.0f}% · 자치구 내 가격 상위 약 {top}% · {tone}"
+    bottom = max(1, round(p))
+    if p <= 20:
+        tone = "가격이 낮은 편"
+    elif p <= 40:
+        tone = "가격이 다소 낮은 편"
+    else:
+        tone = "중간보다 약간 낮은 편"
+    return f"백분위 {p:.0f}% · 자치구 내 가격 하위 약 {bottom}% · {tone}"
+
+
 # =========================================================
 # Header
 # =========================================================
@@ -201,11 +240,11 @@ st.caption(f"서울특별시 25개 자치구 · 오피넷 Network/가격 기준�
 with st.expander("분석 원칙과 공개자료의 한계", expanded=False):
     st.markdown(
         """
-- **목적:** 서울 전체 석유제품 수요와 25개 자치구의 차량시장·주유소 Network·가격을 연결해 영업 담당자가 추가 검토할 지역을 찾습니다.
-- **실제 수익성 계산 아님:** 주유소별 판매량, GS칼텍스 공급가격, 물류비, 판촉·지원비, 여신·채권, 계약조건이 없으므로 실제 이익을 추정하지 않습니다.
-- **분석 단위:** 서울 전체 수요 → 자치구 시장 → 자치구 Network → 가격 경쟁 → 개별 GS Network로 범위를 좁힙니다.
-- **가격/Network 데이터:** 오피넷에서 내려받은 **2026년 9월 12일 기준 스냅샷**입니다. 가격의 장기 추세가 아니라 분석시점의 경쟁 포지션을 봅니다.
-- **최종 점수:** 절대적인 출점/철수 결론이 아니라 25개 구를 상대 비교해 추가 검토 순서를 만드는 스크리닝 지표입니다.
+- 목적: 서울 전체 석유제품 수요와 25개 자치구의 차량시장·주유소 Network·가격을 연결해 영업 담당자가 추가 검토할 지역을 찾습니다.
+- 실제 수익성 계산 아님: 주유소별 판매량, GS칼텍스 공급가격, 물류비, 판촉·지원비, 여신·채권, 계약조건이 없으므로 실제 이익을 추정하지 않습니다.
+- 분석 단위: 서울 전체 수요 → 자치구 시장 → 자치구 Network → 가격 경쟁 → 개별 GS Network로 범위를 좁힙니다.
+- 가격/Network 데이터: 오피넷에서 내려받은 2026년 9월 12일 기준 스냅샷입니다. 가격의 장기 추세가 아니라 분석시점의 경쟁 포지션을 봅니다.
+- 최종 점수: 절대적인 출점/철수 결론이 아니라 25개 구를 상대 비교해 추가 검토 순서를 만드는 스크리닝 지표입니다.
         """
     )
 
@@ -221,10 +260,18 @@ t1, t2, t3, t4, t5, t6 = st.tabs([
 # ---------------------------------------------------------
 with t1:
     st.subheader("분석의 출발점")
-    st.write(
-        "이 프로그램의 핵심 질문은 **'서울 25개 자치구 중 GS칼텍스가 Network 확대를 먼저 검토할 곳과, "
-        "기존 Network의 효율성을 먼저 점검할 곳은 어디인가?'**입니다. 공개자료만으로 실제 수익성을 단정하지 않고, "
-        "시장 수요에서 시작해 Network와 가격, 개별 주유소까지 단계적으로 범위를 좁혀 영업 검토 우선순위를 만듭니다."
+    st.markdown(
+        """
+        <div class="section-text">
+        이 프로그램은 서울 25개 자치구 가운데 GS칼텍스가 신규 Network 확대를 먼저 검토할 지역과, 이미 확보한 Network의 효율성을 먼저 점검할 지역을 찾기 위해 만들었습니다. 단순히 주유소 수가 많은지 적은지만 비교하지 않고, 시장의 크기와 Network 침투 수준, 가격 경쟁 위치를 순서대로 연결해 영업 검토 우선순위를 좁히는 것이 핵심입니다.<br><br>
+        분석은 서울 전체의 휘발유·경유 소비 흐름에서 시작합니다. 서울의 정유제품 시장이 어떤 방향으로 움직이는지를 확인한 뒤, 자치구별 자동차 등록대수와 전체 주유소 수를 이용해 지역별 잠재 시장규모와 Network 밀도를 비교합니다. 자치구별 석유 소비량은 공개자료에서 직접 확인하기 어려우므로 자동차 등록대수와 주유소당 등록차량은 실제 판매량이 아니라 시장규모를 가늠하기 위한 보조지표로 사용합니다.<br><br>
+        다음 단계에서는 각 자치구에서 GS칼텍스 주유소가 전체 주유소 중 어느 정도의 비중을 차지하는지 확인합니다. 차량시장이 상대적으로 크지만 GS칼텍스 Network 비중이 낮다면 Network 확대 가능성을 추가로 검토할 수 있고, 반대로 GS칼텍스 비중이 이미 높은데 주유소당 잠재 차량시장이 상대적으로 작다면 신규 확대보다 현재 Network의 판매성과와 운영효율을 먼저 점검할 필요가 있습니다.<br><br>
+        이후 가격 분석에서는 각 자치구의 평균가격과 GS칼텍스 평균가격, 경쟁 브랜드 평균가격을 비교합니다. 가격이 높다는 사실을 곧바로 문제로 보거나 가격인하 필요성으로 연결하지 않고, 고객이 받아들이는 가격 수준인지, 입지·서비스·프로모션과 함께 설명되는지, 인근 경쟁점 대비 어떤 위치인지 추가 확인해야 할 지역을 찾는 데 사용합니다.<br><br>
+        마지막에는 자치구 단위 분석에서 개별 GS칼텍스 주유소까지 범위를 좁힙니다. 선택한 주유소가 자치구 전체 가격분포에서 상위 또는 하위 어느 수준에 있는지를 확인하고, 필요할 경우 오피넷 API의 최신 주변 경쟁정보를 참고합니다. 이렇게 시장 수요 → 자치구 시장 → Network → 가격 경쟁 → 개별 주유소의 순서로 분석한 뒤, Network 확대·기존 Network 효율화·가격전략 점검 중 어떤 검토를 먼저 할지를 제시합니다.<br><br>
+        다만 이 프로그램의 결론은 출점, 철수, 가격변경을 확정하는 결론이 아닙니다. 공개자료만으로는 주유소별 판매량, 공급가격, 물류비, 판촉·시설지원비, 여신·채권, 계약조건, 신규 투자비 등을 확인할 수 없기 때문입니다. 따라서 본 프로그램은 실제 국내영업 의사결정에 앞서 어디부터 더 깊게 확인해야 하는지를 구조화하는 1차 스크리닝 도구로 해석합니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -248,9 +295,9 @@ with t1:
         "사용 데이터": [
             "서울 휘발유·경유 월별 소비량",
             "자치구별 자동차 등록대수 + 주유소 수",
-            "브랜드별 주유소 수 + 셀프 여부",
+            "브랜드별 주유소 수",
             "브랜드별 휘발유·경유 가격",
-            "개별 주유소 가격·주소·운영형태",
+            "개별 주유소 가격·주소",
             "앞선 지표의 상대비교 결과",
         ],
     })
@@ -258,9 +305,7 @@ with t1:
 
     st.markdown("### 이 분석이 도달하려는 결론")
     st.info(
-        "시장규모에 비해 GS칼텍스 Network 비중이 낮은 자치구는 **Network 확대 후보**, 이미 GS Network가 상대적으로 충분하지만 "
-        "주유소당 잠재 차량시장이 작은 곳은 **기존 Network 효율화 후보**, GS 가격 프리미엄이 큰 곳은 **가격 경쟁 추가점검 후보**로 구분합니다. "
-        "이후 실제 의사결정에서는 내부 판매량·공급가격·물류비·판촉비·여신/채권·계약조건을 연결해 수익성을 검증해야 합니다."
+        "시장규모에 비해 GS칼텍스 Network 비중이 낮은 자치구는 Network 확대 검토 후보로, GS Network가 상대적으로 높은데 주유소당 잠재 차량시장이 작은 곳은 기존 Network 효율화 검토 후보로 봅니다. 또한 GS칼텍스 가격이 자치구 평균보다 상대적으로 높은 곳은 가격전략을 추가 점검할 후보로 분류합니다. 이후 실제 의사결정에서는 내부 판매량·공급가격·물류비·판촉비·여신·채권·계약조건을 연결해 수익성을 검증해야 합니다."
     )
 
 # ---------------------------------------------------------
@@ -272,7 +317,7 @@ with t2:
         "① 수요에서 시작합니다.",
         "Network 전략을 보기 전에 서울의 정유제품 시장 자체가 어떻게 움직이는지 확인해야 지역 Network 확대 판단이 단순 점포 수 비교에 그치지 않습니다.",
         "서울 전체 휘발유·경유 월별 소비량을 확인한 뒤, 25개 구의 자동차 등록대수와 주유소당 등록차량을 비교합니다. 자치구별 석유 소비량은 공개자료에 없어 자동차 등록대수를 잠재 시장규모의 보조지표로 사용합니다.",
-        "서울 전체의 수요 흐름과 함께, 어떤 구가 상대적으로 큰 차량시장과 높은 Network 수용여력을 갖는지 확인합니다.",
+        "서울 전체 수요의 방향과 함께, 어떤 구가 상대적으로 큰 차량시장과 높은 Network 수용여력을 갖는지 확인합니다.",
     )
 
     fuel = st.radio("제품", ["휘발유", "경유"], horizontal=True, key="demand_fuel")
@@ -311,6 +356,18 @@ with t2:
         )
     st.caption("자동차 등록대수와 주유소당 등록차량은 실제 유류 판매량이 아니라 자치구별 잠재 시장규모와 Network 밀도를 비교하기 위한 보조지표입니다.")
 
+    district_d = st.selectbox("결론을 자세히 볼 자치구", TARGET_DISTRICTS, key="demand_conclusion_district")
+    rr = summary[summary["district"] == district_d].iloc[0]
+    avg_vps = summary["vehicles_per_station"].mean()
+    vps_side = "서울 평균보다 높은" if rr["vehicles_per_station"] > avg_vps else "서울 평균보다 낮은"
+    yoy_text = "증가" if pd.notna(rr["vehicle_yoy"]) and rr["vehicle_yoy"] > 0 else "감소"
+    conclusion_box([
+        f"서울 {fuel} 수요는 {latest_year}년 1~{m}월 누적으로 전년 동기 대비 {yoy:+.1f}% 변했습니다. 이는 서울 전체 정유제품 시장의 방향을 확인하는 기준입니다.",
+        f"{district_d}의 자동차 등록대수는 {fmt_num(rr['vehicles'])}대이며, 주유소 1곳당 등록차량은 {fmt_num(rr['vehicles_per_station'])}대로 {vps_side} 수준입니다.",
+        f"자동차 등록대수는 전년 동월 대비 {rr['vehicle_yoy']:+.2f}%로 {yoy_text}해 지역 차량시장의 방향도 함께 확인할 수 있습니다.",
+        "따라서 이 탭에서는 서울 전체 수요와 자치구별 잠재 시장규모를 먼저 확인하고, 다음 Network 탭에서 GS칼텍스 침투 수준과 연결해 확대 여부를 검토합니다.",
+    ])
+
 # ---------------------------------------------------------
 # 3. Network
 # ---------------------------------------------------------
@@ -319,8 +376,8 @@ with t3:
     guide(
         "② 시장규모 다음에는 Network 침투도를 봅니다.",
         "시장규모가 커도 GS칼텍스 Network가 이미 충분히 확보된 곳과 상대적으로 부족한 곳은 영업전략이 달라야 합니다.",
-        "자치구별 전체 주유소와 브랜드별 주유소 수, GS칼텍스 Network 비중, 셀프 운영비중을 비교하고 앞 탭의 주유소당 등록차량과 함께 봅니다.",
-        "시장규모 대비 GS Network가 상대적으로 부족한 구와, 이미 높은 비중을 확보한 구를 구분해 확대와 효율화의 후보군을 만듭니다.",
+        "자치구별 전체 주유소와 브랜드별 주유소 수, GS칼텍스 Network 비중을 비교하고 앞 탭의 주유소당 등록차량과 함께 봅니다.",
+        "시장규모 대비 GS Network가 상대적으로 부족한 구와 이미 높은 비중을 확보한 구를 구분해 확대와 효율화 후보군을 만듭니다.",
     )
 
     cnt = net.groupby(["district", "brand"]).size().reset_index(name="주유소수")
@@ -328,21 +385,31 @@ with t3:
     fig.update_layout(height=470, xaxis_title="", xaxis_tickangle=-45, legend_title="상표", margin=dict(l=10, r=10, t=55, b=85))
     st.plotly_chart(fig, use_container_width=True)
 
-    show = summary[["district", "stations", "gs_stations", "gs_share", "self_share", "vehicles_per_station"]].sort_values("gs_share", ascending=False).copy()
-    show.columns = ["자치구", "전체 주유소", "GS칼텍스", "GS Network 비중(%)", "셀프 비중(%)", "주유소당 등록차량"]
+    show = summary[["district", "stations", "gs_stations", "gs_share", "vehicles_per_station"]].sort_values("gs_share", ascending=False).copy()
+    show.columns = ["자치구", "전체 주유소", "GS칼텍스", "GS Network 비중(%)", "주유소당 등록차량"]
     st.dataframe(
-        show.style.format({"전체 주유소": "{:,.0f}", "GS칼텍스": "{:,.0f}", "GS Network 비중(%)": "{:.1f}", "셀프 비중(%)": "{:.1f}", "주유소당 등록차량": "{:,.0f}"}),
+        show.style.format({"전체 주유소": "{:,.0f}", "GS칼텍스": "{:,.0f}", "GS Network 비중(%)": "{:.1f}", "주유소당 등록차량": "{:,.0f}"}),
         hide_index=True, use_container_width=True, height=490,
     )
 
-    district_n = st.selectbox("운영형태를 자세히 볼 자치구", TARGET_DISTRICTS, key="network_district")
-    nd = net[net["district"] == district_n]
-    brand_self = nd.groupby("brand", as_index=False)["self_service"].mean()
-    brand_self["셀프비중"] = brand_self["self_service"] * 100
-    fig_self = px.bar(brand_self.sort_values("셀프비중"), x="셀프비중", y="brand", orientation="h", labels={"brand": "상표", "셀프비중": "셀프 비중(%)"}, title=f"{district_n} 브랜드별 셀프주유소 비중")
-    fig_self.update_layout(height=350, margin=dict(l=10, r=10, t=55, b=10))
-    st.plotly_chart(fig_self, use_container_width=True)
-    st.caption("셀프 비중은 운영형태를 설명하는 보조지표입니다. 인건비·투자비·판매량이 없으므로 셀프 비중만으로 운영효율을 단정하지 않습니다.")
+    district_n = st.selectbox("결론을 자세히 볼 자치구", TARGET_DISTRICTS, key="network_district")
+    r = summary[summary["district"] == district_n].iloc[0]
+    med_share = summary["gs_share"].median()
+    med_vps = summary["vehicles_per_station"].median()
+    share_desc = "중앙값보다 낮아" if r["gs_share"] < med_share else "중앙값보다 높아"
+    vps_desc = "중앙값보다 높습니다" if r["vehicles_per_station"] > med_vps else "중앙값보다 낮습니다"
+    if r["gs_share"] < med_share and r["vehicles_per_station"] > med_vps:
+        action_text = "시장규모 대비 GS Network 침투가 상대적으로 낮아 Network 확대 가능성을 우선 검토할 후보로 볼 수 있습니다."
+    elif r["gs_share"] >= med_share and r["vehicles_per_station"] <= med_vps:
+        action_text = "GS Network는 상대적으로 충분한 반면 주유소당 잠재 차량시장은 작아 신규 확대보다 기존 Network 효율을 먼저 점검할 후보로 볼 수 있습니다."
+    else:
+        action_text = "Network 비중과 시장규모가 한 방향으로 뚜렷하지 않아 가격과 개별 주유소 경쟁환경을 함께 확인하는 것이 적절합니다."
+    conclusion_box([
+        f"{district_n}에는 전체 주유소 {int(r['stations'])}개 중 GS칼텍스가 {int(r['gs_stations'])}개로, GS Network 비중은 {r['gs_share']:.1f}%입니다.",
+        f"이 비중은 서울 25개 구의 중앙값과 비교해 {share_desc} 보이며, 주유소당 등록차량은 {r['vehicles_per_station']:,.0f}대로 {vps_desc}",
+        action_text,
+        "다만 실제 확대·효율화 판단에는 주유소별 판매량, 인근 GS 점포 간 수요 중첩, 계약 확보 가능성, 예상 투자비와 물류조건을 추가로 확인해야 합니다.",
+    ])
 
 # ---------------------------------------------------------
 # 4. Price
@@ -352,8 +419,8 @@ with t4:
     guide(
         "③ Network 수만으로는 경쟁력을 판단할 수 없습니다.",
         "같은 자치구에서도 소비자가 접하는 가격은 다르며, GS칼텍스가 지역·경쟁사 대비 어느 가격대에 위치하는지 확인해야 합니다.",
-        "자치구를 선택해 전체 평균가격, GS칼텍스 평균가격, 브랜드별 평균과 가격분포를 비교합니다.",
-        "GS 가격 프리미엄이 큰 곳을 찾아 고객수용성·입지·서비스·프로모션·경쟁강도를 추가로 확인할 후보로 분류합니다. 가격 프리미엄 자체를 수익성으로 해석하지 않습니다.",
+        "자치구를 선택해 전체 평균가격, GS칼텍스 평균가격, 브랜드별 평균가격과 중앙가격·최저·최고가격을 비교합니다.",
+        "GS 가격이 자치구 평균보다 높거나 낮은지를 확인해 고객수용성·입지·서비스·프로모션·경쟁강도를 추가로 확인할 지역을 찾습니다. 가격 프리미엄 자체를 수익성으로 해석하지 않습니다.",
     )
 
     c1, c2 = st.columns(2)
@@ -361,10 +428,11 @@ with t4:
     fuel_p = c2.radio("제품", ["휘발유", "경유"], horizontal=True, key="price_fuel")
     _, price_col, _ = FUEL_COLS[fuel_p]
     pd_d = net[net["district"] == district_p].copy()
-    brand_avg = pd_d.groupby("brand", as_index=False)[price_col].mean().dropna().sort_values(price_col)
+    valid = pd_d.dropna(subset=[price_col]).copy()
+    brand_avg = valid.groupby("brand", as_index=False)[price_col].mean().sort_values(price_col)
 
-    district_avg = pd_d[price_col].mean()
-    gs_avg = pd_d.loc[pd_d["brand"] == "GS칼텍스", price_col].mean()
+    district_avg = valid[price_col].mean()
+    gs_avg = valid.loc[valid["brand"] == "GS칼텍스", price_col].mean()
     gap = gs_avg - district_avg
 
     m1, m2, m3 = st.columns(3)
@@ -378,10 +446,47 @@ with t4:
     fig.update_layout(height=410, xaxis_title="", margin=dict(l=10, r=10, t=55, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-    fig_box = px.box(pd_d.dropna(subset=[price_col]), x="brand", y=price_col, points="outliers", labels={"brand": "상표", price_col: "원/L"}, title="브랜드별 가격 분포")
-    fig_box.update_layout(height=420, xaxis_title="", margin=dict(l=10, r=10, t=55, b=10))
-    st.plotly_chart(fig_box, use_container_width=True)
+    st.markdown("#### 브랜드별 가격 수준을 어떻게 봐야 하나요?")
+    st.caption("아래 표는 각 브랜드의 평균만이 아니라 중앙가격, 최저·최고가격과 관측 주유소 수를 함께 보여줍니다. 극단값 하나 때문에 분포가 왜곡되는 것을 피하기 위해 박스플롯 대신 숫자로 비교합니다.")
+    brand_stats = (
+        valid.groupby("brand")[price_col]
+        .agg(["count", "min", "median", "mean", "max"])
+        .reset_index()
+        .sort_values("mean")
+    )
+    brand_stats.columns = ["브랜드", "주유소 수", "최저가격", "중앙가격", "평균가격", "최고가격"]
+    st.dataframe(
+        brand_stats.style.format({
+            "주유소 수": "{:,.0f}", "최저가격": "{:,.0f}원/L", "중앙가격": "{:,.0f}원/L",
+            "평균가격": "{:,.0f}원/L", "최고가격": "{:,.0f}원/L",
+        }),
+        hide_index=True, use_container_width=True,
+    )
     st.caption(f"가격과 Network는 {SNAPSHOT_DATE} 기준 스냅샷입니다. 장기 가격추세가 아니라 분석시점의 경쟁 포지션을 보여줍니다.")
+
+    if pd.isna(gs_avg):
+        lines = [
+            f"{district_p}에는 현재 저장 데이터 기준 GS칼텍스 {fuel_p} 가격을 계산할 수 있는 관측값이 없어 브랜드 평균 비교가 어렵습니다.",
+            "따라서 이 지역은 가격 자체보다 GS Network 존재 여부와 개별 점포 데이터 확보 여부를 먼저 확인해야 합니다.",
+            "경쟁 브랜드의 가격 수준은 표에서 확인할 수 있지만 GS와의 직접 격차를 계산해 전략을 제시하는 것은 적절하지 않습니다.",
+            "실제 영업 검토에서는 최신 가격과 판매량, 주변 경쟁점 거리와 프로모션 조건을 추가로 확인해야 합니다.",
+        ]
+    else:
+        direction = "낮은" if gap < 0 else "높은" if gap > 0 else "같은"
+        meaning = (
+            "지역 평균보다 낮은 가격대로 형성되어 있어 가격 경쟁 측면에서는 상대적으로 공격적인 위치로 볼 수 있습니다."
+            if gap < 0 else
+            "지역 평균보다 높은 가격대로 형성되어 있어 고객이 이 가격을 받아들이는 이유와 입지·서비스 차별성을 함께 점검할 필요가 있습니다."
+            if gap > 0 else
+            "지역 평균과 유사한 가격대로 형성되어 있어 가격 자체보다 입지와 서비스, 경쟁점 구성이 더 중요한 비교 요소가 될 수 있습니다."
+        )
+        lines = [
+            f"{district_p}의 {fuel_p} 평균가격은 {district_avg:,.0f}원/L이고, GS칼텍스 평균은 {gs_avg:,.0f}원/L로 자치구 평균보다 {abs(gap):,.0f}원/L {direction} 수준입니다.",
+            meaning,
+            "브랜드별 중앙가격과 최저·최고가격을 함께 보면 평균값 하나만으로는 보이지 않는 경쟁 브랜드의 가격 폭과 포지션도 확인할 수 있습니다.",
+            "다만 가격 차이만으로 판매성과나 수익성을 판단하지 않고, 실제 판매량·마진·입지·프로모션·주변 경쟁점 가격을 추가 확인해야 합니다.",
+        ]
+    conclusion_box(lines)
 
 # ---------------------------------------------------------
 # 5. Individual network
@@ -403,6 +508,12 @@ with t5:
     gs_list = net[(net["district"] == district_i) & (net["brand"] == "GS칼텍스")].sort_values("station_name")
     if gs_list.empty:
         st.warning("선택 자치구에 GS칼텍스 주유소 데이터가 없습니다.")
+        conclusion_box([
+            f"{district_i}에는 현재 저장된 오피넷 스냅샷 기준 GS칼텍스 주유소가 없어 개별 Network 가격진단을 수행할 수 없습니다.",
+            "이 경우 개별 점포의 가격 위치보다 해당 자치구에서 GS Network가 비어 있는 이유와 신규 Network 확보 가능성을 먼저 확인하는 것이 적절합니다.",
+            "다만 Network 공백이 곧바로 출점 기회를 의미하는 것은 아니며 부지, 경쟁강도, 예상 판매량과 계약조건을 함께 검토해야 합니다.",
+            "최종 판단은 Network 확대 검토 탭의 시장규모 지표와 내부 영업정보를 결합해 내려야 합니다.",
+        ])
     else:
         station_name = st.selectbox("GS칼텍스 주유소", gs_list["station_name"].tolist())
         row = gs_list[gs_list["station_name"] == station_name].iloc[0]
@@ -416,17 +527,35 @@ with t5:
         a.metric("선택 주유소 가격", "-" if pd.isna(sp) else f"{sp:,.0f}원/L")
         b.metric("자치구 평균 대비", "-" if pd.isna(sp) else f"{sp-davg:+,.0f}원/L")
         c.metric("GS 평균 대비", "-" if pd.isna(sp) else f"{sp-gsavg:+,.0f}원/L")
-        dcol.metric("자치구 가격 백분위", "-" if pd.isna(percentile) else f"{percentile:.0f}%")
-        st.write(f"**주소:** {row['address']}  ·  **셀프:** {'Y' if row['self_service'] else 'N'}")
+        dcol.metric("자치구 내 가격 위치", price_position(percentile))
+        st.write(f"주소: {row['address']}")
 
-        compare = dd[["station_name", "brand", price_i, "self_service"]].sort_values(price_i).copy()
-        st.dataframe(compare.rename(columns={"station_name": "주유소", "brand": "상표", price_i: f"{fuel_i} 가격", "self_service": "셀프"}), hide_index=True, use_container_width=True, height=320)
+        compare = dd[["station_name", "brand", price_i]].sort_values(price_i).copy()
+        st.dataframe(compare.rename(columns={"station_name": "주유소", "brand": "상표", price_i: f"{fuel_i} 가격"}), hide_index=True, use_container_width=True, height=320)
+
+        if pd.isna(sp):
+            lines = [
+                f"{station_name}의 {fuel_i} 가격은 현재 저장 데이터에서 확인되지 않아 자치구 내 가격 위치를 계산할 수 없습니다.",
+                "따라서 이 주유소는 가격 비교보다 최신 가격정보 확보가 우선입니다.",
+                "주변 경쟁점과의 비교를 위해서는 오피넷 API 또는 동일 기준일의 추가 데이터를 확인할 수 있습니다.",
+                "가격이 확보된 뒤 판매량·입지·프로모션과 함께 보아야 실제 영업 판단으로 연결할 수 있습니다.",
+            ]
+        else:
+            higher_lower = "높습니다" if sp > davg else "낮습니다" if sp < davg else "같습니다"
+            gs_higher_lower = "높습니다" if sp > gsavg else "낮습니다" if sp < gsavg else "같습니다"
+            lines = [
+                f"{station_name}의 {fuel_i} 가격은 {sp:,.0f}원/L로 {district_i} 평균보다 {abs(sp-davg):,.0f}원/L {higher_lower}",
+                f"같은 자치구의 GS칼텍스 평균과 비교하면 {abs(sp-gsavg):,.0f}원/L {gs_higher_lower} 자치구 전체에서는 {price_position(percentile)}에 위치합니다.",
+                "따라서 선택 주유소가 지역 평균보다 높은 가격대를 유지한다면 입지·서비스·고객충성도·주변 경쟁점 가격이 이를 설명하는지 추가로 확인할 필요가 있습니다.",
+                "반대로 낮은 가격대라면 판매량 확대 효과와 마진 부담을 함께 확인해야 하며, 가격 수준만으로 성과를 단정하지 않습니다.",
+            ]
+        conclusion_box(lines)
 
     st.markdown("#### 최신 주변 경쟁정보 · 오피넷 API (선택 기능)")
     st.caption("핵심 분석은 저장된 2026.09.12 데이터만으로 작동합니다. API는 최신 경쟁정보를 확인할 때만 쓰는 보조기능입니다.")
     api_key = get_api_key()
     if not api_key:
-        st.info("API Key가 없어도 기본 분석은 정상 작동합니다. 필요하면 Streamlit Secrets에 `OPINET_API_KEY`를 설정하세요.")
+        st.info("API Key가 없어도 기본 분석은 정상 작동합니다. 필요하면 Streamlit Secrets에 OPINET_API_KEY를 설정하세요.")
     else:
         with st.expander("최신 주변 경쟁주유소 조회", expanded=False):
             colx, coly, colr = st.columns(3)
@@ -453,10 +582,17 @@ with t5:
 with t6:
     st.subheader("최종결론 · 서울 25개 구 영업 검토 우선순위")
     guide(
-        "⑤ 마지막에는 데이터를 '영업의 다음 행동'으로 바꿉니다.",
+        "⑤ 마지막에는 데이터를 영업의 다음 행동으로 바꿉니다.",
         "대시보드가 숫자 나열에 그치지 않도록 앞선 수요·시장규모·Network·가격 지표를 종합해 25개 구 중 어디부터 더 깊게 볼지 정합니다.",
         "Network 확대는 낮은 GS 비중·높은 주유소당 등록차량·차량 증가세를, 기존 Network 효율화는 높은 GS 비중·낮은 주유소당 등록차량을, 가격점검은 GS의 자치구 평균 대비 가격 프리미엄을 상대순위로 비교합니다.",
         "각 영역의 1순위와 상위 후보를 제시하되, 이는 출점·철수·가격변경의 확정 결론이 아니라 내부 수익성 데이터를 추가 확인할 우선순위입니다.",
+    )
+
+    st.markdown("#### 스크리닝 점수는 무엇인가요?")
+    st.info(
+        "확대 검토점수는 GS Network 비중이 낮을수록, 주유소당 등록차량이 많을수록, 자동차 등록대수 증가율이 높을수록 점수가 올라갑니다. "
+        "효율화 검토점수는 GS Network 비중이 높을수록, 주유소당 등록차량이 적을수록 점수가 올라갑니다. "
+        "가격점검 순위는 GS칼텍스 평균가격이 자치구 평균보다 얼마나 높은지를 상대 비교한 것입니다. 모든 점수는 실제 수익성 점수가 아니라 추가 확인 순서를 정하기 위한 상대적 스크리닝 지표입니다."
     )
 
     expand_top = summary.sort_values("expansion_score", ascending=False).head(5)
@@ -465,37 +601,73 @@ with t6:
 
     a, b, c = st.columns(3)
     with a:
-        top = expand_top.iloc[0]
-        st.metric("Network 확대 검토 1순위", top["district"], f"스크리닝 {top['expansion_score']:.0f}점")
-        st.caption(f"GS 비중 {top['gs_share']:.1f}% · 주유소당 차량 {top['vehicles_per_station']:,.0f}대 · 자동차 YoY {top['vehicle_yoy']:+.2f}%")
+        top_exp = expand_top.iloc[0]
+        st.metric("Network 확대 검토 1순위", top_exp["district"], f"스크리닝 {top_exp['expansion_score']:.0f}점")
+        st.caption(f"GS 비중 {top_exp['gs_share']:.1f}% · 주유소당 차량 {top_exp['vehicles_per_station']:,.0f}대 · 자동차 YoY {top_exp['vehicle_yoy']:+.2f}%")
     with b:
-        top = eff_top.iloc[0]
-        st.metric("기존 Network 효율화 1순위", top["district"], f"스크리닝 {top['efficiency_score']:.0f}점")
-        st.caption(f"GS 비중 {top['gs_share']:.1f}% · 주유소당 차량 {top['vehicles_per_station']:,.0f}대")
+        top_eff = eff_top.iloc[0]
+        st.metric("기존 Network 효율화 1순위", top_eff["district"], f"스크리닝 {top_eff['efficiency_score']:.0f}점")
+        st.caption(f"GS 비중 {top_eff['gs_share']:.1f}% · 주유소당 차량 {top_eff['vehicles_per_station']:,.0f}대")
     with c:
         if not price_top.empty:
-            top = price_top.iloc[0]
-            st.metric("가격 경쟁 점검 1순위", top["district"], f"평균 프리미엄 {top['avg_price_gap']:+.0f}원/L")
-            st.caption(f"휘발유 {top['gs_gasoline_gap']:+.0f}원/L · 경유 {top['gs_diesel_gap']:+.0f}원/L")
+            top_price = price_top.iloc[0]
+            st.metric("가격 경쟁 점검 1순위", top_price["district"], f"평균 프리미엄 {top_price['avg_price_gap']:+.0f}원/L")
+            st.caption(f"휘발유 {top_price['gs_gasoline_gap']:+.0f}원/L · 경유 {top_price['gs_diesel_gap']:+.0f}원/L")
 
     st.markdown("### 1. Network 확대 검토 후보")
     exp_show = expand_top[["district", "gs_share", "vehicles_per_station", "vehicle_yoy", "expansion_score"]].copy()
     exp_show.columns = ["자치구", "GS Network 비중(%)", "주유소당 등록차량", "자동차 YoY(%)", "확대 검토점수"]
     st.dataframe(exp_show.style.format({"GS Network 비중(%)": "{:.1f}", "주유소당 등록차량": "{:,.0f}", "자동차 YoY(%)": "{:+.2f}", "확대 검토점수": "{:.0f}"}), hide_index=True, use_container_width=True)
-    st.caption("GS 비중이 상대적으로 낮고, 주유소당 차량시장과 차량 증가세가 높은 구일수록 상단에 위치합니다.")
+    e1 = expand_top.iloc[0]
+    e2 = expand_top.iloc[1] if len(expand_top) > 1 else e1
+    st.markdown(
+        f"""
+        <div class="conclusion-box">
+        확대 후보는 GS Network 비중이 낮으면서 주유소당 등록차량이 많고 차량시장 증가세가 상대적으로 높은 지역을 우선 선별한 결과입니다.<br>
+        현재 1순위는 {e1['district']}로, GS Network 비중 {e1['gs_share']:.1f}%, 주유소당 등록차량 {e1['vehicles_per_station']:,.0f}대, 자동차 YoY {e1['vehicle_yoy']:+.2f}%입니다. 단순히 GS 비중이 낮다는 이유만이 아니라 시장규모와 성장 방향을 함께 본 결과입니다.<br>
+        상위 후보 중 GS 주유소가 0개인 지역은 Network 공백 자체가 추가 검토 사유가 되지만, 기존 Network가 없다는 사실만으로 신규 출점을 정당화하지는 않습니다. 예상 판매량, 경쟁점 거리, 부지·계약 확보 가능성을 함께 확인해야 합니다.<br>
+        따라서 확대 후보 표는 신규 출점 확정표가 아니라 영업 담당자가 어디부터 상권·교통량·판매잠재력·브랜드 전환 가능성을 조사할지 정하는 우선순위로 해석합니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown("### 2. 기존 Network 효율화 검토 후보")
     eff_show = eff_top[["district", "gs_share", "vehicles_per_station", "efficiency_score"]].copy()
     eff_show.columns = ["자치구", "GS Network 비중(%)", "주유소당 등록차량", "효율화 검토점수"]
     st.dataframe(eff_show.style.format({"GS Network 비중(%)": "{:.1f}", "주유소당 등록차량": "{:,.0f}", "효율화 검토점수": "{:.0f}"}), hide_index=True, use_container_width=True)
-    st.caption("GS 비중이 상대적으로 높으면서 주유소당 잠재 차량시장이 낮은 구는 신규 확대보다 기존 Network의 판매량·비용·운영성과를 먼저 점검하는 방향으로 해석합니다.")
+    f1 = eff_top.iloc[0]
+    st.markdown(
+        f"""
+        <div class="conclusion-box">
+        효율화 후보는 GS칼텍스 Network 비중이 이미 상대적으로 높으면서 주유소당 등록차량이 낮은 지역을 우선 선별한 결과입니다.<br>
+        현재 1순위는 {f1['district']}로, GS Network 비중은 {f1['gs_share']:.1f}%이고 주유소당 등록차량은 {f1['vehicles_per_station']:,.0f}대입니다. 공개자료만 보면 신규 Network 추가보다 현재 점포별 판매성과와 수요 중첩 여부를 먼저 점검할 필요성이 상대적으로 높습니다.<br>
+        다만 주유소당 등록차량이 낮다는 사실만으로 비효율이라고 단정할 수 없습니다. 유동교통량, 법인·사업용 수요, 점포별 판매량, 마진과 물류조건에 따라 실제 성과는 달라질 수 있습니다.<br>
+        따라서 효율화 후보 표는 철수 후보가 아니라 기존 Network 안에서 판매량·비용·점포 간 수요잠식 여부를 우선 확인할 지역의 순서입니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown("### 3. 가격 경쟁 추가점검 후보")
     if not price_top.empty:
         price_show = price_top[["district", "gs_gasoline_gap", "gs_diesel_gap", "avg_price_gap"]].copy()
         price_show.columns = ["자치구", "GS 휘발유 가격차", "GS 경유 가격차", "평균 가격차"]
         st.dataframe(price_show.style.format({"GS 휘발유 가격차": "{:+.0f}원/L", "GS 경유 가격차": "{:+.0f}원/L", "평균 가격차": "{:+.0f}원/L"}), hide_index=True, use_container_width=True)
-    st.caption("가격 프리미엄이 크다는 사실만으로 가격인하를 제안하지 않습니다. 고객수용성·입지·서비스·프로모션·경쟁점 가격을 추가 확인해야 한다는 의미입니다.")
+        p1 = price_top.iloc[0]
+        st.markdown(
+            f"""
+            <div class="conclusion-box">
+            가격 점검 후보는 GS칼텍스 평균가격이 해당 자치구 전체 평균보다 상대적으로 높은 지역을 우선 선별한 결과입니다.<br>
+            현재 1순위는 {p1['district']}로, GS칼텍스는 자치구 평균 대비 휘발유 {p1['gs_gasoline_gap']:+.0f}원/L, 경유 {p1['gs_diesel_gap']:+.0f}원/L의 차이를 보입니다. 이는 가격경쟁 위치를 추가로 확인할 필요가 있다는 의미입니다.<br>
+            가격 프리미엄이 크다고 바로 가격을 내려야 한다고 결론내리지는 않습니다. 입지, 서비스, 고객충성도, 판촉, 주변 경쟁점 가격이 높은 가격을 정당화할 수도 있기 때문입니다.<br>
+            실제 영업에서는 가격변경 전 판매량 반응, 마진, 경쟁점 가격, 프로모션 효과를 함께 확인해 가격전략의 적정성을 판단해야 합니다.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("가격 비교가 가능한 GS칼텍스 데이터가 충분하지 않습니다.")
 
     st.markdown("### 4. 자치구별 종합판단")
     final_table = summary[["district", "primary_action", "gs_share", "vehicles_per_station", "vehicle_yoy", "gs_gasoline_gap", "gs_diesel_gap"]].copy()
@@ -506,23 +678,31 @@ with t6:
     r = summary[summary["district"] == selected].iloc[0]
     st.markdown(f"#### {selected} · {r['primary_action']}")
     st.write(
-        f"{selected}에는 전체 주유소가 **{int(r['stations'])}개** 있고, 이 중 GS칼텍스는 **{int(r['gs_stations'])}개({r['gs_share']:.1f}%)**입니다. "
-        f"최근 자동차 등록대수는 **{r['vehicles']:,.0f}대**, 주유소 1곳당 등록차량은 **{r['vehicles_per_station']:,.0f}대**이며 자동차 등록대수는 전년 동월 대비 **{r['vehicle_yoy']:+.2f}%**입니다. "
-        f"GS칼텍스 평균가격은 자치구 평균 대비 휘발유 **{r['gs_gasoline_gap']:+.0f}원/L**, 경유 **{r['gs_diesel_gap']:+.0f}원/L** 수준입니다."
+        f"{selected}에는 전체 주유소가 {int(r['stations'])}개 있고, 이 중 GS칼텍스는 {int(r['gs_stations'])}개({r['gs_share']:.1f}%)입니다. "
+        f"최근 자동차 등록대수는 {r['vehicles']:,.0f}대, 주유소 1곳당 등록차량은 {r['vehicles_per_station']:,.0f}대이며 자동차 등록대수는 전년 동월 대비 {r['vehicle_yoy']:+.2f}%입니다. "
+        f"GS칼텍스 평균가격은 자치구 평균 대비 휘발유 {r['gs_gasoline_gap']:+.0f}원/L, 경유 {r['gs_diesel_gap']:+.0f}원/L 수준입니다."
     )
 
     if r["primary_action"] == "Network 확대 우선검토":
-        st.success("공개자료 단계에서는 시장규모 대비 GS Network 침투가 상대적으로 낮은지를 우선 확인할 후보입니다. 신규 출점뿐 아니라 기존 주유소의 브랜드 전환·계약 확보 가능성도 검토대상입니다.")
+        action_detail = "시장규모 대비 GS Network 침투가 상대적으로 낮아 신규 출점, 브랜드 전환, 계약 확보 가능성을 먼저 검토할 지역으로 분류됩니다."
     elif r["primary_action"] == "기존 Network 효율화 우선검토":
-        st.info("공개자료 단계에서는 신규 Network 추가보다 현재 보유 Network의 판매량·비용·운영성과를 먼저 점검할 후보입니다.")
+        action_detail = "GS Network가 상대적으로 충분한 편이므로 신규 확대보다 현재 점포의 판매량, 비용, 수요 중첩과 운영성과를 먼저 확인할 지역으로 분류됩니다."
     else:
-        st.info("Network 확대/효율화 한 방향으로 단정하기보다 개별 주유소의 가격·입지·경쟁환경을 추가 확인하는 것이 우선인 구입니다.")
+        action_detail = "Network 확대나 효율화 한 방향으로 단정하기보다 가격, 입지, 경쟁점과 개별 주유소 성과를 더 확인해야 할 지역으로 분류됩니다."
 
-    st.warning(
-        "**최종 의사결정 전 추가 검증:** 주유소별 실제 판매량, GS칼텍스 공급가격과 마진, 물류비, 판촉·시설지원비, 여신·채권, 계약조건, 신규점 투자비와 기존 Network 판매잠식 여부를 연결해야 합니다."
+    st.markdown(
+        f"""
+        <div class="conclusion-box">
+        {action_detail}<br>
+        이 판단은 GS Network 비중과 주유소당 등록차량을 중심으로 만든 1차 분류이므로 실제 수익성이나 점포성과를 직접 의미하지 않습니다.<br>
+        가격차가 함께 크게 나타나는 경우에는 Network 규모 판단과 별도로 고객수용성·경쟁점 가격·프로모션을 추가 점검할 필요가 있습니다.<br>
+        최종 의사결정 전에는 주유소별 판매량, 공급가격과 마진, 물류비, 판촉·시설지원비, 여신·채권, 계약조건, 신규점 투자비와 기존 Network 판매잠식 여부를 반드시 연결해야 합니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     st.markdown("### 프로그램의 최종 메시지")
     st.success(
-        "서울 전체 수요에서 시작해 25개 구의 시장규모·GS Network 침투도·가격 경쟁을 연결하고, 개별 Network까지 내려가 '어디를 먼저 더 깊게 볼 것인가'를 구조화했습니다. 공개자료로 수익성을 임의 추정하지 않고 실제 국내영업 의사결정의 검토 순서를 구현한 것이 핵심입니다."
+        "서울 전체 수요에서 시작해 25개 구의 시장규모, GS Network 침투도, 가격 경쟁을 연결하고 개별 Network까지 내려가 어디를 먼저 더 깊게 볼 것인가를 구조화했습니다. 공개자료로 수익성을 임의 추정하지 않고 실제 국내영업 의사결정의 검토 순서를 구현한 것이 핵심입니다."
     )
