@@ -52,9 +52,27 @@ div[data-testid="stMetric"] {border:1px solid rgba(128,128,128,.18); padding:12p
 # File helpers
 # =========================================================
 def find_file(filename: str):
-    for p in [DATA_DIR / filename, BASE_DIR / filename]:
+    """
+    사용자가 제공한 원자료를 우선 탐색한다.
+    - 배포용: ./data, 앱과 같은 폴더
+    - ChatGPT 작업환경: /mnt/data
+    - 파일명이 완전히 같지 않아도 공백/중복표시가 있는 경우 glob으로 보완
+    """
+    roots = [DATA_DIR, BASE_DIR, Path("/mnt/data")]
+    for root in roots:
+        p = root / filename
         if p.exists():
             return p
+
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    for root in roots:
+        if not root.exists():
+            continue
+        candidates = list(root.glob(f"*{stem.split(' (')[0]}*{suffix}"))
+        if candidates:
+            candidates = sorted(candidates, key=lambda x: (len(x.name), x.name))
+            return candidates[0]
     return None
 
 def read_csv_kr(path, **kwargs):
@@ -430,14 +448,24 @@ summary = network_summary()
 # Opinet API - existing ancillary facilities are top priority
 # =========================================================
 def get_api_key():
+    secret_key = ""
     try:
-        return st.secrets.get("OPINET_API_KEY", "")
+        secret_key = st.secrets.get("OPINET_API_KEY", "")
     except Exception:
-        return ""
+        secret_key = ""
+
+    entered = st.sidebar.text_input(
+        "오피넷 API 인증키",
+        value=secret_key,
+        type="password",
+        help="오피넷에서 발급받은 인증키입니다. Streamlit Secrets의 OPINET_API_KEY로 넣어도 됩니다.",
+        key="opinet_api_key_input",
+    )
+    return entered.strip()
 
 def opinet_detail(key, station_id):
     url = "https://www.opinet.co.kr/api/detailById.do"
-    params = {"code": key, "out": "json", "id": station_id}
+    params = {"certkey": key, "out": "json", "id": station_id}
     r = requests.get(url, params=params, timeout=8)
     r.raise_for_status()
     js = r.json()
@@ -462,8 +490,40 @@ def yn_text(v):
 # =========================================================
 # Header
 # =========================================================
+API_KEY = get_api_key()
+
 st.title("⛽ GS칼텍스 국내영업 Network·유외수익 의사결정 지원 도구")
 st.caption("최고가격제 → 서울 Network 축소 → 지역 수요 → GS Network → 기존 유외시설 → 저투자형 수익기회 순으로 분석")
+
+if API_KEY:
+    st.success("오피넷 API 연결 준비 완료 · 개별 GS 주유소의 세차장/경정비/편의점 정보를 조회할 수 있습니다.")
+else:
+    st.warning(
+        "오피넷 API 인증키가 아직 입력되지 않았습니다. "
+        "네가 준 가격·주유소변동·자동차·상권 원자료 분석은 그대로 작동하지만, "
+        "GS 주유소별 기존 유외시설(CAR_WASH_YN / MAINT_YN / CVS_YN) 조회는 API 연결 후 활성화됩니다."
+    )
+
+with st.expander("현재 원자료 연결 상태", expanded=False):
+    source_checks = {
+        "국제 석유제품가격": find_file("국제_석유제품가격2026011-2026092.xlsx") or find_file("국제_석유제품가격2026011-2026092.xls"),
+        "정유사 주간 공급가격": find_file("정유사_주간공급가격_회사별.xls"),
+        "주유소 평균판매가격": find_file("주유소_제품별_평균판매가격.xls"),
+        "전국 주유소 등록현황": find_file("산업통상부_전국 주유소 등록현황_20251231 (1).csv"),
+        "서울 자동차 등록현황": find_file("서울시 자치구 읍면동별 연료별 자동차 등록현황(행정동)(26년7월).xlsx"),
+        "길단위인구-상권": find_file("서울시 상권분석서비스(길단위인구-상권).csv"),
+        "상주인구-상권": find_file("서울시 상권분석서비스(상주인구-상권).csv"),
+        "직장인구-상권": find_file("서울시 상권분석서비스(직장인구-상권).csv"),
+        "아파트-상권": find_file("서울시 상권분석서비스(아파트-상권).csv"),
+        "점포-상권": find_file("서울시 상권분석서비스(점포-상권)_2025년.zip"),
+        "추정매출-상권": find_file("서울시 상권분석서비스(추정매출-상권)_2025년.zip"),
+    }
+    status_df = pd.DataFrame(
+        [{"자료": k, "상태": "연결됨" if v else "확인 필요", "파일": Path(v).name if v else "-"}
+         for k, v in source_checks.items()]
+    )
+    st.dataframe(status_df, hide_index=True, use_container_width=True)
+    st.caption("GS 주유소별 세차장·경정비·편의점은 파일이 아니라 오피넷 API에서 조회합니다.")
 
 with st.expander("분석 원칙과 공개자료 한계", expanded=False):
     st.markdown("""
@@ -703,7 +763,7 @@ with tabs[3]:
 with tabs[4]:
     st.subheader("GS Network 침투도와 소비자가격 포지션")
     if not CORE_OK:
-        st.info("이 탭은 기존 프로그램의 `data/network_snapshot.csv`, `vehicles_monthly.csv`, `consumption_monthly.csv`가 있을 때 활성화됩니다.")
+        st.info("이 탭의 브랜드별 현재 Network 비교는 오피넷 실시간 Network 데이터 연결이 필요한 영역입니다. 네가 준 원자료가 누락된 것이 아닙니다.")
     else:
         guide(
             "④ 지역별 GS Network의 상대적 위치를 확인합니다.",
@@ -828,7 +888,7 @@ with tabs[5]:
 with tabs[6]:
     st.subheader("개별 GS 주유소 · 기존 유외시설부터 확인")
     if not CORE_OK:
-        st.info("개별 주유소 선택은 기존 `network_snapshot.csv`가 있을 때 활성화됩니다.")
+        st.info("개별 GS 주유소 분석은 오피넷의 주유소 ID/Network 목록을 연결한 뒤 활성화됩니다. 네가 준 원자료가 빠진 것이 아닙니다.")
     else:
         gs = net[net["brand"]=="GS칼텍스"].copy()
         if gs.empty:
@@ -841,7 +901,7 @@ with tabs[6]:
             st.write(f"주소: {row.get('address','-')}")
 
             id_col = detect_station_id_col(g)
-            api_key = get_api_key()
+            api_key = API_KEY
             st.markdown("#### 1순위 확인: 기존 유외시설")
             if id_col is None:
                 st.warning("현재 network_snapshot.csv에 오피넷 주유소 ID가 없어 상세시설 API를 자동 호출할 수 없습니다. `station_id` 또는 `UNI_ID` 열을 저장하면 자동 연결됩니다.")
